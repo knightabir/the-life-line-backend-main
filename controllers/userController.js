@@ -4,6 +4,7 @@ const PDFDocument = require('pdfkit');
 const BloodGroup = require('../models/BloodGroups');
 const RequirementRequest = require('../models/RequirementRequest');
 const DonationRequest = require('../models/DonationRequest');
+const cloudinary = require('../helpers/cloudinaryConfig');
 
 const { sendTemplateMsg, sendBloodRequirementNotification } = require('../helpers/whatsappHelper');
 const Admin = require('../models/Admin');
@@ -60,8 +61,6 @@ exports.updateUserAvatar = async (req, res) => {
         const userId = req.user._id;
         const file = req.file;
 
-        console.log(file);
-
         if (!file) {
             return res.status(400).json({ error: 'No file uploaded' });
         }
@@ -71,14 +70,49 @@ exports.updateUserAvatar = async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        // Store the uploaded image
-        user.avatar = `/public/uploads/${file.filename}`;
+        // Delete old avatar from Cloudinary if exists
+        if (user.avatar && user.avatarPublicId) {
+            try {
+                await cloudinary.uploader.destroy(user.avatarPublicId);
+            } catch (error) {
+                console.log('Error deleting old avatar:', error);
+                // Continue even if deletion fails
+            }
+        }
+
+        // Upload new image to Cloudinary
+        const uploadResult = await new Promise((resolve, reject) => {
+            cloudinary.uploader.upload_stream(
+                {
+                    resource_type: 'image',
+                    folder: 'user_avatars', // Optional: organize images in folders
+                    transformation: [
+                        { width: 400, height: 400, crop: 'fill' }, // Optional: resize image
+                        { quality: 'auto:good' } // Optional: optimize quality
+                    ]
+                },
+                (error, result) => {
+                    if (error) {
+                        reject(error);
+                    } else {
+                        resolve(result);
+                    }
+                }
+            ).end(file.buffer);
+        });
+
+        // Update user with Cloudinary URL and public_id
+        user.avatar = uploadResult.secure_url;
+        user.avatarPublicId = uploadResult.public_id; // Store for future deletion
         await user.save();
 
-        res.status(200).json({ message: 'Avatar updated successfully' });
+        res.status(200).json({ 
+            message: 'Avatar updated successfully',
+            avatarUrl: uploadResult.secure_url
+        });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Server error' });
+        console.error('Error updating avatar:', err);
+        res.status(500).json({ error: 'Server error while updating avatar' });
     }
 };
 

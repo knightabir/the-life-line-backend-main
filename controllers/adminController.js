@@ -572,11 +572,15 @@ exports.getFilteredDonations = async (req, res) => {
 };
 
 exports.updateDonationStatus = async (req, res) => {
+  if(req.body == null || req.body == undefined){
+    return res.status(400).json({ error: "No body data provided." });
+  }
   const { donationId } = req.params;
   const { status } = req.body;
-  let session;
 
   try {
+
+
     if (
       status !== "Completed" &&
       status !== "Cancelled" &&
@@ -605,103 +609,97 @@ exports.updateDonationStatus = async (req, res) => {
     }
 
     if (status === "Completed") {
-      session = await mongoose.startSession();
-
-      const result = await session.withTransaction(async () => {
-        // Single aggregation pipeline to get all required data in one query
-        const donationData = await DonationRequest.aggregate([
-          {
-            $match: { _id: new mongoose.Types.ObjectId(donationId) },
+      // Single aggregation pipeline to get all required data in one query
+      const donationData = await DonationRequest.aggregate([
+        {
+          $match: { _id: new mongoose.Types.ObjectId(donationId) },
+        },
+        {
+          $lookup: {
+            from: "users",
+            localField: "userId",
+            foreignField: "_id",
+            as: "user",
           },
-          {
-            $lookup: {
-              from: "users",
-              localField: "userId",
-              foreignField: "_id",
-              as: "user",
-            },
-          },
-          {
-            $lookup: {
-              from: "bloodgroups",
-              localField: "bloodgroup",
-              foreignField: "_id",
-              as: "bloodGroup",
-            },
-          },
-          {
-            $unwind: "$user",
-          },
-          {
-            $unwind: "$bloodGroup",
-          },
-        ]).session(session);
+        },
+        {
+          $lookup: {
+            from: "bloodgroups",
+            localField: "bloodgroup",
+            foreignField: "_id",
+            as: "bloodGroup",
+        },
+        },
+        {
+          $unwind: "$user",
+        },
+        {
+          $unwind: "$bloodGroup",
+        },
+      ]);
 
-        if (!donationData || donationData.length === 0) {
-          throw new Error("Donation request not found");
-        }
+      if (!donationData || donationData.length === 0) {
+        return res.status(404).json({ error: "Donation request not found" });
+      }
 
-        const donation = donationData[0];
+      const donation = donationData[0];
 
-        if (donation.status === "Cancelled") {
-          throw new Error("Donation request already cancelled");
-        }
+      if (donation.status === "Cancelled") {
+        return res.status(400).json({ error: "Donation request already cancelled" });
+      }
 
-        if (donation.status === "Completed") {
-          throw new Error("Donation request already Completed");
-        }
+      if (donation.status === "Completed") {
+        return res.status(400).json({ error: "Donation request already completed" });
+      }
 
-        // Execute both updates concurrently within the transaction
-        await Promise.all([
-          DonationRequest.findByIdAndUpdate(
-            donation._id,
-            { $set: { status: "Completed" } },
-            { session }
-          ),
-          User.findByIdAndUpdate(
-            donation.userId,
-            { $inc: { donationPoints: 10 } },
-            { session }
-          ),
-        ]);
+      // Update donation status first
+      await DonationRequest.findByIdAndUpdate(
+        donation._id,
+        { $set: { status: "Completed" } }
+      );
 
-        return {
-          userName: donation.user.name,
-          userPhone: donation.user.phone,
-          bloodGroupName: donation.bloodGroup.name || donation.bloodGroup.type,
-          donationDate: donation.donationDate,
-        };
-      });
+      // Then update user points
+      await User.findByIdAndUpdate(
+        donation.userId,
+        { $inc: { donationPoints: 10 } }
+      );
 
-      // Send WhatsApp message after successful transaction
+      const result = {
+        userName: donation.user.name,
+        userPhone: donation.user.phone,
+        bloodGroupName: donation.bloodGroup.name || donation.bloodGroup.type,
+        donationDate: donation.donationDate,
+      };
+
+      // Send WhatsApp message after successful updates
       const message = `
-  🩸 **BLOOD DONATION COMPLETED** 🩸
-  🎉 **Congratulations, Hero!** 🎉
-  Your blood donation has been successfully completed and registered in our system.
-  
-  📋 **Donation Details:**
-  ━━━━━━━━━━━━━━━━━━━━━━
-  👤 **Donor:** *${result.userName}*
-  🩸 **Blood Group:** *${result.bloodGroupName}*
-  📅 **Date:** *${result.donationDate.toLocaleString()}*
-  ━━━━━━━━━━━━━━━━━━━━━━
-  
-  ✨ ** Your Impact:**
-  ✅ You've potentially * saved up to 3 lives *
-  ✅ Your donation helps * patients in critical need *
-  ✅ You've * made a difference * in someone's family
-  
-  🏆 ** What's Next:**
-  📄 Your ** digital certificate ** has been generated
-  📧 Download link will be ** sent to your email **
-  💧 * Stay hydrated * and rest well
-  ⏳ You can donate again ** after 56 days **
-  
-  💝 ** Thank you for being a lifesaver! **
-  * Your selfless act of kindness brings hope to those who need it most.*
-      You are truly a ** HERO ** in someone's story! 🦸‍♂️🦸‍♀️
-  
-  ❤️ * Together, we save lives! * ❤️
+🩸 **BLOOD DONATION COMPLETED** 🩸
+🎉 **Congratulations, Hero!** 🎉
+Your blood donation has been successfully completed and registered in our system.
+
+📋 **Donation Details:**
+━━━━━━━━━━━━━━━━━━━━━━
+👤 **Donor:** *${result.userName}*
+🩸 **Blood Group:** *${result.bloodGroupName}*
+📅 **Date:** *${result.donationDate.toLocaleString()}*
+━━━━━━━━━━━━━━━━━━━━━━
+
+✨ **Your Impact:**
+✅ You've potentially *saved up to 3 lives*
+✅ Your donation helps *patients in critical need*
+✅ You've *made a difference* in someone's family
+
+🏆 **What's Next:**
+📄 Your **digital certificate** has been generated
+📧 Download link will be **sent to your email**
+💧 *Stay hydrated* and rest well
+⏳ You can donate again **after 56 days**
+
+💝 **Thank you for being a lifesaver!**
+*Your selfless act of kindness brings hope to those who need it most.*
+    You are truly a **HERO** in someone's story! 🦸‍♂️🦸‍♀️
+
+❤️ *Together, we save lives!* ❤️
       `;
 
       await sendBloodDonationCompleteMessage(result.userPhone, message);
@@ -710,106 +708,67 @@ exports.updateDonationStatus = async (req, res) => {
     }
 
     if (status === "Cancelled") {
-      session = await mongoose.startSession();
-
-      const result = await session.withTransaction(async () => {
-        // Single aggregation pipeline to get all required data in one query
-        const donationData = await DonationRequest.aggregate([
-          {
-            $match: { _id: new mongoose.Types.ObjectId(donationId) },
+      // Single aggregation pipeline to get all required data in one query
+      const donationData = await DonationRequest.aggregate([
+        {
+          $match: { _id: new mongoose.Types.ObjectId(donationId) },
+        },
+        {
+          $lookup: {
+            from: "users",
+            localField: "userId",
+            foreignField: "_id",
+            as: "user",
           },
-          {
-            $lookup: {
-              from: "users",
-              localField: "userId",
-              foreignField: "_id",
-              as: "user",
-            },
+        },
+        {
+          $lookup: {
+            from: "bloodgroups",
+            localField: "bloodgroup",
+            foreignField: "_id",
+            as: "bloodGroup",
           },
-          {
-            $lookup: {
-              from: "bloodgroups",
-              localField: "bloodgroup",
-              foreignField: "_id",
-              as: "bloodGroup",
-            },
-          },
-          {
-            $unwind: "$user",
-          },
-          {
-            $unwind: "$bloodGroup",
-          },
-        ]).session(session);
+        },
+        {
+          $unwind: "$user",
+        },
+        {
+          $unwind: "$bloodGroup",
+        },
+      ]);
 
-        if (!donationData || donationData.length === 0) {
-          throw new Error("Donation request not found");
-        }
+      if (!donationData || donationData.length === 0) {
+        return res.status(404).json({ error: "Donation request not found" });
+      }
 
-        const donation = donationData[0];
+      const donation = donationData[0];
 
-        if (donation.status === "Cancelled") {
-          throw new Error("Donation request already cancelled");
-        }
+      if (donation.status === "Cancelled") {
+        return res.status(400).json({ error: "Donation request already cancelled" });
+      }
 
-        if (donation.status === "Completed") {
-          throw new Error("Donation request already Completed");
-        }
+      if (donation.status === "Completed") {
+        return res.status(400).json({ error: "Donation request already completed" });
+      }
 
-        // Execute both updates concurrently within the transaction
-        await Promise.all([
-          DonationRequest.findByIdAndUpdate(
-            donation._id,
-            { $set: { status: "Cancelled" } },
-            { session }
-          ),
-          User.findByIdAndUpdate(
-            donation.userId,
-            { $inc: { donationPoints: -10 } },
-            { session }
-          ),
-        ]);
+      // Update donation status first
+      await DonationRequest.findByIdAndUpdate(
+        donation._id,
+        { $set: { status: "Cancelled" } }
+      );
 
-        return {
-          userName: donation.user.name,
-          userPhone: donation.user.phone,
-          bloodGroupName: donation.bloodGroup.name || donation.bloodGroup.type,
-          donationDate: donation.donationDate,
-        };
-      });
+      // Then update user points (deduct 10 points)
+      await User.findByIdAndUpdate(
+        donation.userId,
+        { $inc: { donationPoints: -10 } }
+      );
 
-      // Send WhatsApp message after successful transaction
-      const message = `
-  🩸 **BLOOD DONATION CANCELLED** 🩸
-  🎉 **Congratulations, Hero!** 🎉
-  Your blood donation has been successfully cancelled and registered in our system.
-  
-  📋 **Donation Details:**
-  ━━━━━━━━━━━━━━━━━━━━━━
-  👤 **Donor:** *${result.userName}*
-  🩸 **Blood Group:** *${result.bloodGroupName}*
-  📅 **Date:** *${result.donationDate.toLocaleString()}*
-  ━━━━━━━━━━━━━━━━━━━━━━
-  
-  ✨ ** Your Impact:**
-  ✅ You've potentially * saved up to 3 lives *
-  ✅ Your donation helps * patients in critical need *
-  ✅ You've * made a difference * in someone's family
-  
-  🏆 ** What's Next:**
-  📄 Your ** digital certificate ** has been generated
-  📧 Download link will be ** sent to your email **
-  💧 * Stay hydrated * and rest well
-  ⏳ You can donate again ** after 56 days **
-  
-  💝 ** Thank you for being a lifesaver! **
-  * Your selfless act of kindness brings hope to those who need it most.*
-      You are truly a ** HERO ** in someone's story! 🦸‍♂️🦸‍♀️
-  
-  ❤️ * Together, we save lives! * ❤️
-      `;
-
-      await sendBloodDonationCancelMessage(result.userPhone, message);
+      const result = {
+        userName: donation.user.name,
+        userPhone: donation.user.phone,
+        bloodGroupName: donation.bloodGroup.name || donation.bloodGroup.type,
+        donationDate: donation.donationDate,
+      };
 
       res.status(200).json({ message: "Donation status updated successfully" });
     }
@@ -817,9 +776,5 @@ exports.updateDonationStatus = async (req, res) => {
     res
       .status(500)
       .json({ message: "Error updating donation status", error: err.message });
-  } finally {
-    if (session) {
-      await session.endSession();
-    }
   }
 };
